@@ -1,8 +1,8 @@
-import browser from '../../util/browser';
-import Map from '../../ui/map';
-import DOM from '../../util/dom';
+import {browser} from '../../util/browser';
+import {Map} from '../../ui/map';
+import {DOM} from '../../util/dom';
 import simulate from '../../../test/unit/lib/simulate_interaction';
-import {setMatchMedia, setPerformance, setWebGlContext} from '../../util/test/util';
+import {setPerformance, beforeMapTest} from '../../util/test/util';
 
 function createMap() {
     return new Map({
@@ -16,9 +16,7 @@ function createMap() {
 }
 
 beforeEach(() => {
-    setPerformance();
-    setWebGlContext();
-    setMatchMedia();
+    beforeMapTest();
 });
 
 describe('ScrollZoomHandler', () => {
@@ -273,4 +271,83 @@ describe('ScrollZoomHandler', () => {
 
     });
 
+    test('Zooms for single mouse wheel tick while not in the center of the map and terrain is on, should zoom according to mouse position', () => {
+        const browserNow = jest.spyOn(browser, 'now');
+        let now = 1555555555555;
+        browserNow.mockReturnValue(now);
+
+        const map = createMap();
+        map._renderTaskQueue.run();
+        map.terrain = {
+            pointCoordinate: () => null
+        } as any;
+
+        // simulate a single 'wheel' event
+        simulate.wheel(map.getCanvas(), {type: 'wheel', deltaY: -simulate.magicWheelZoomDelta, clientX: 1000, clientY: 1000});
+        map._renderTaskQueue.run();
+
+        now += 400;
+        browserNow.mockReturnValue(now);
+        map._renderTaskQueue.run();
+
+        expect(map.getCenter().lat).toBeCloseTo(-11.6371, 3);
+        expect(map.getCenter().lng).toBeCloseTo(11.0286, 3);
+
+        map.remove();
+    });
+
+    test('Terrain 3D zoom is in the same direction when pointing above horizon or under horizon', () => {
+        // See also https://github.com/maplibre/maplibre-gl-js/issues/3398
+        const browserNow = jest.spyOn(browser, 'now');
+        let now = 1555555555555;
+        browserNow.mockReturnValue(now);
+
+        let map = createMap();
+        map._renderTaskQueue.run();
+        map.terrain = {
+            pointCoordinate: () => null
+        } as any;
+        map.setZoom(5);
+        map.setMaxPitch(85);
+        map.setPitch(80);
+        map._renderTaskQueue.run();
+
+        // simulate a single 'wheel' event on top of screen
+        simulate.wheel(map.getCanvas(), {type: 'wheel', deltaY: -simulate.magicWheelZoomDelta, clientX: map.getCanvas().width / 2, clientY: 10});
+        map._renderTaskQueue.run();
+
+        now += 400;
+        browserNow.mockReturnValue(now);
+        map._renderTaskQueue.run();
+
+        // On Top, use center point
+        expect(map.getCenter().lat).toBeCloseTo(0, 3);
+        expect(map.getCenter().lng).toBeCloseTo(0, 3);
+        expect(map.getZoom()).toBeCloseTo(5.02856, 3);
+
+        // do the same test on the bottom
+        map = createMap();
+        map._renderTaskQueue.run();
+        map.terrain = {
+            pointCoordinate: () => null
+        } as any;
+        map.setZoom(5);
+        map.setMaxPitch(85);
+        map.setPitch(80);
+        map._renderTaskQueue.run();
+
+        // simulate a single 'wheel' event on bottom of screen
+        simulate.wheel(map.getCanvas(), {type: 'wheel', deltaY: -simulate.magicWheelZoomDelta, clientX: map.getCanvas().width / 2, clientY: map.getCanvas().height - 10});
+        map._renderTaskQueue.run();
+
+        now += 400;
+        browserNow.mockReturnValue(now);
+        map._renderTaskQueue.run();
+
+        expect(map.getCenter().lat).toBeCloseTo(-0.125643, 3);
+        expect(map.getCenter().lng).toBeCloseTo(0.0, 3);
+        expect(map.getZoom()).toBeCloseTo(5.02856, 3);
+
+        map.remove();
+    });
 });

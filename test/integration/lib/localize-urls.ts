@@ -1,8 +1,8 @@
 import path from 'path';
 import fs from 'fs';
-import {StyleSpecification} from '../../../src/style-spec/types.g';
+import {StyleSpecification} from '@maplibre/maplibre-gl-style-spec';
 
-export default function localizeURLs(style: any, port: number, baseTestsDir: string, requireFn: any) {
+export function localizeURLs(style: any, port: number, baseTestsDir: string) {
     localizeStyleURLs(style, port);
     if (style.metadata && style.metadata.test && style.metadata.test.operations) {
         style.metadata.test.operations.forEach((op) => {
@@ -17,12 +17,7 @@ export default function localizeURLs(style: any, port: number, baseTestsDir: str
                 let styleJSON;
                 try {
                     const relativePath = op[1].replace(/^local:\/\//, '');
-                    if (relativePath.startsWith('mapbox-gl-styles')) {
-                        styleJSON = fs.readFileSync(path.join(path.dirname(requireFn.resolve('mapbox-gl-styles')), '..', relativePath));
-                    } else {
-                        styleJSON = fs.readFileSync(path.join(baseTestsDir, 'assets', relativePath));
-                    }
-
+                    styleJSON = fs.readFileSync(path.join(baseTestsDir, 'assets', relativePath));
                 } catch (error) {
                     console.log(`* ${error}`);
                     return;
@@ -91,8 +86,15 @@ function localizeStyleURLs(style: StyleSpecification, port: number) {
     }
 
     if (style.sprite) {
-        style.sprite = localizeMapboxSpriteURL(style.sprite, port);
-        style.sprite = localizeURL(style.sprite, port);
+        if (typeof style.sprite === 'string') {
+            style.sprite = localizeMapboxSpriteURL(style.sprite, port);
+            style.sprite = localizeURL(style.sprite, port);
+        } else if (Array.isArray(style.sprite)) {
+            for (const sprite of style.sprite) {
+                sprite.url = localizeMapboxSpriteURL(sprite.url, port);
+                sprite.url = localizeURL(sprite.url, port);
+            }
+        }
     }
 
     if (style.glyphs) {

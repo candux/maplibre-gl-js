@@ -1,17 +1,15 @@
-import styleSpec from '../style-spec/reference/latest';
+import {interpolates, Color, latest as styleSpec} from '@maplibre/maplibre-gl-style-spec';
 
-import {extend, sphericalToCartesian} from '../util/util';
+import {sphericalToCartesian} from '../util/util';
 import {Evented} from '../util/evented';
 import {
     validateStyle,
     validateLight,
     emitValidationErrors
 } from './validate_style';
-import Color from '../style-spec/util/color';
-import {number as interpolate} from '../style-spec/util/interpolate';
 
-import type {StylePropertySpecification} from '../style-spec/style-spec';
-import type EvaluationParameters from './evaluation_parameters';
+import type {StylePropertySpecification, LightSpecification} from '@maplibre/maplibre-gl-style-spec';
+import type {EvaluationParameters} from './evaluation_parameters';
 import type {StyleSetterOptions} from '../style/style';
 import {Properties, Transitionable, Transitioning, PossiblyEvaluated, DataConstantProperty} from './properties';
 
@@ -20,8 +18,6 @@ import type {
     PropertyValue,
     TransitionParameters
 } from './properties';
-
-import type {LightSpecification} from '../style-spec/types.g';
 
 type LightPosition = {
     x: number;
@@ -45,9 +41,9 @@ class LightPositionProperty implements Property<[number, number, number], LightP
 
     interpolate(a: LightPosition, b: LightPosition, t: number): LightPosition {
         return {
-            x: interpolate(a.x, b.x, t),
-            y: interpolate(a.y, b.y, t),
-            z: interpolate(a.z, b.z, t),
+            x: interpolates.number(a.x, b.x, t),
+            y: interpolates.number(a.y, b.y, t),
+            z: interpolates.number(a.z, b.z, t),
         };
     }
 }
@@ -66,31 +62,32 @@ type PropsPossiblyEvaluated = {
     'intensity': number;
 };
 
-const properties: Properties<Props> = new Properties({
-    'anchor': new DataConstantProperty(styleSpec.light.anchor as StylePropertySpecification),
-    'position': new LightPositionProperty(),
-    'color': new DataConstantProperty(styleSpec.light.color as StylePropertySpecification),
-    'intensity': new DataConstantProperty(styleSpec.light.intensity as StylePropertySpecification),
-});
-
 const TRANSITION_SUFFIX = '-transition';
+
+let lightProperties: Properties<Props>;
 
 /*
  * Represents the light used to light extruded features.
  */
-class Light extends Evented {
+export class Light extends Evented {
     _transitionable: Transitionable<Props>;
     _transitioning: Transitioning<Props>;
     properties: PossiblyEvaluated<Props, PropsPossiblyEvaluated>;
 
     constructor(lightOptions?: LightSpecification) {
         super();
-        this._transitionable = new Transitionable(properties);
+        lightProperties = lightProperties || new Properties({
+            'anchor': new DataConstantProperty(styleSpec.light.anchor as StylePropertySpecification),
+            'position': new LightPositionProperty(),
+            'color': new DataConstantProperty(styleSpec.light.color as StylePropertySpecification),
+            'intensity': new DataConstantProperty(styleSpec.light.intensity as StylePropertySpecification),
+        });
+        this._transitionable = new Transitionable(lightProperties);
         this.setLight(lightOptions);
         this._transitioning = this._transitionable.untransitioned();
     }
 
-    getLight() {
+    getLight(): LightSpecification {
         return this._transitionable.serialize();
     }
 
@@ -128,13 +125,11 @@ class Light extends Evented {
             return false;
         }
 
-        return emitValidationErrors(this, validate.call(validateStyle, extend({
+        return emitValidationErrors(this, validate.call(validateStyle, {
             value,
             // Workaround for https://github.com/mapbox/mapbox-gl-js/issues/2407
             style: {glyphs: true, sprite: true},
             styleSpec
-        })));
+        }));
     }
 }
-
-export default Light;

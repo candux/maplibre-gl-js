@@ -1,20 +1,19 @@
-import assert from 'assert';
-
-import TransferableGridIndex from './transferable_grid_index';
-import Color from '../style-spec/util/color';
-import {StylePropertyFunction, StyleExpression, ZoomDependentExpression, ZoomConstantExpression} from '../style-spec/expression';
-import CompoundExpression from '../style-spec/expression/compound_expression';
-import expressions from '../style-spec/expression/definitions';
-import ResolvedImage from '../style-spec/expression/types/resolved_image';
+import {TransferableGridIndex} from './transferable_grid_index';
+import {Color, CompoundExpression, expressions, ResolvedImage, StylePropertyFunction,
+    StyleExpression, ZoomDependentExpression, ZoomConstantExpression} from '@maplibre/maplibre-gl-style-spec';
 import {AJAXError} from './ajax';
-
-import type {Transferable} from '../types/transferable';
 import {isImageBitmap} from './util';
 
-type SerializedObject = {
-    [_: string]: Serialized;
-}; // eslint-disable-line
+/**
+ * A class that is serizlized to and json, that can be constructed back to the original class in the worker or in the main thread
+ */
+type SerializedObject<S extends Serialized = any> = {
+    [_: string]: S;
+};
 
+/**
+ * All the possible values that can be serialized and sent to and from the worker
+ */
 export type Serialized = null | void | boolean | number | string | Boolean | Number | String | Date | RegExp | ArrayBuffer | ArrayBufferView | ImageData | ImageBitmap | Blob | Array<Serialized> | SerializedObject;
 
 type Registry = {
@@ -28,8 +27,17 @@ type Registry = {
     };
 };
 
+/**
+ * Register options
+ */
 type RegisterOptions<T> = {
+    /**
+     * List of properties to omit from serialization (e.g., cached/computed properties)
+     */
     omit?: ReadonlyArray<keyof T>;
+    /**
+     * List of properties that should be serialized by a simple shallow copy, rather than by a recursive call to serialize().
+     */
     shallow?: ReadonlyArray<keyof T>;
 };
 
@@ -38,11 +46,7 @@ const registry: Registry = {};
 /**
  * Register the given class as serializable.
  *
- * @param options
- * @param options.omit List of properties to omit from serialization (e.g., cached/computed properties)
- * @param options.shallow List of properties that should be serialized by a simple shallow copy, rather than by a recursive call to serialize().
- *
- * @private
+ * @param options - the registration options
  */
 export function register<T extends any>(
     name: string,
@@ -51,7 +55,7 @@ export function register<T extends any>(
     },
     options: RegisterOptions<T> = {}
 ) {
-    assert(!registry[name], `${name} is already registered.`);
+    if (registry[name]) throw new Error(`${name} is already registered.`);
     ((Object.defineProperty as any))(klass, '_classRegistryKey', {
         value: name,
         writeable: false
@@ -98,8 +102,6 @@ function isArrayBuffer(value: any): value is ArrayBuffer {
  * If a `transferables` array is provided, add any transferable objects (i.e.,
  * any ArrayBuffers or ArrayBuffer views) to the list. (If a copy is needed,
  * this should happen in the client code, before using serialize().)
- *
- * @private
  */
 export function serialize(input: unknown, transferables?: Array<Transferable> | null): Serialized {
     if (input === null ||
@@ -112,7 +114,8 @@ export function serialize(input: unknown, transferables?: Array<Transferable> | 
         input instanceof String ||
         input instanceof Date ||
         input instanceof RegExp ||
-        input instanceof Blob) {
+        input instanceof Blob ||
+        input instanceof Error) {
         return input;
     }
 
@@ -157,9 +160,9 @@ export function serialize(input: unknown, transferables?: Array<Transferable> | 
         const klass = (input.constructor as any);
         const name = klass._classRegistryKey;
         if (!name) {
-            throw new Error('can\'t serialize object of unregistered class');
+            throw new Error(`can't serialize object of unregistered class ${klass.name}`);
         }
-        assert(registry[name]);
+        if (!registry[name]) throw new Error(`${name} is not registered.`);
 
         const properties: SerializedObject = klass.serialize ?
             // (Temporary workaround) allow a class to provide static
@@ -173,10 +176,9 @@ export function serialize(input: unknown, transferables?: Array<Transferable> | 
 
         if (!klass.serialize) {
             for (const key in input) {
-                // any cast due to https://github.com/facebook/flow/issues/5393
-                if (!(input as any).hasOwnProperty(key)) continue; // eslint-disable-line no-prototype-builtins
+                if (!input.hasOwnProperty(key)) continue; // eslint-disable-line no-prototype-builtins
                 if (registry[name].omit.indexOf(key) >= 0) continue;
-                const property = (input as any)[key];
+                const property = input[key];
                 properties[key] = registry[name].shallow.indexOf(key) >= 0 ?
                     property :
                     serialize(property, transferables);
@@ -185,8 +187,9 @@ export function serialize(input: unknown, transferables?: Array<Transferable> | 
                 properties.message = input.message;
             }
         } else {
-            // make sure statically serialized object survives transfer of $name property
-            assert(!transferables || properties as any !== transferables[transferables.length - 1]);
+            if (transferables && properties === transferables[transferables.length - 1]) {
+                throw new Error('statically serialized object won\'t survive transfer of $name property');
+            }
         }
 
         if (properties.$name) {
@@ -214,6 +217,7 @@ export function deserialize(input: Serialized): unknown {
         input instanceof Date ||
         input instanceof RegExp ||
         input instanceof Blob ||
+        input instanceof Error ||
         isArrayBuffer(input) ||
         isImageBitmap(input) ||
         ArrayBuffer.isView(input) ||
@@ -226,7 +230,7 @@ export function deserialize(input: Serialized): unknown {
     }
 
     if (typeof input === 'object') {
-        const name = (input as any).$name || 'Object';
+        const name = input.$name || 'Object';
         if (!registry[name]) {
             throw new Error(`can't deserialize unregistered class ${name}`);
         }

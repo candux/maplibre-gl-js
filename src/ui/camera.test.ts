@@ -1,9 +1,14 @@
-import Camera from '../ui/camera';
-import Transform from '../geo/transform';
-import TaskQueue, {TaskID} from '../util/task_queue';
-import browser from '../util/browser';
+import {Camera, CameraOptions} from '../ui/camera';
+import {Transform} from '../geo/transform';
+import {TaskQueue, TaskID} from '../util/task_queue';
+import {browser} from '../util/browser';
 import {fixedLngLat, fixedNum} from '../../test/unit/lib/fixed';
 import {setMatchMedia} from '../util/test/util';
+import {mercatorZfromAltitude} from '../geo/mercator_coordinate';
+import {Terrain} from '../render/terrain';
+import {LngLat, LngLatLike} from '../geo/lng_lat';
+import {Event} from '../util/evented';
+import {LngLatBounds} from '../geo/lng_lat_bounds';
 
 beforeEach(() => {
     setMatchMedia();
@@ -54,6 +59,68 @@ function assertTransitionTime(done, camera, min, max) {
             done();
         });
 }
+
+describe('#calculateCameraOptionsFromTo', () => {
+    // Choose initial zoom to avoid center being constrained by mercator latitude limits.
+    const camera = createCamera({zoom: 1});
+
+    test('look at north', () => {
+        const cameraOptions: CameraOptions = camera.calculateCameraOptionsFromTo({lng: 1, lat: 0}, 0, {lng: 1, lat: 1});
+        expect(cameraOptions).toBeDefined();
+        expect(cameraOptions.center).toBeDefined();
+        expect(cameraOptions.bearing).toBeCloseTo(0);
+    });
+
+    test('look at west', () => {
+        const cameraOptions = camera.calculateCameraOptionsFromTo({lng: 1, lat: 0}, 0, {lng: 0, lat: 0});
+        expect(cameraOptions).toBeDefined();
+        expect(cameraOptions.bearing).toBeCloseTo(-90);
+    });
+
+    test('pitch 45', () => {
+        // altitude same as grounddistance => 45°
+        // distance between lng x and lng x+1 is 111.2km at same lat
+        const cameraOptions: CameraOptions = camera.calculateCameraOptionsFromTo({lng: 1, lat: 0}, 111200, {lng: 0, lat: 0});
+        expect(cameraOptions).toBeDefined();
+        expect(cameraOptions.pitch).toBeCloseTo(45);
+    });
+
+    test('pitch 90', () => {
+        const cameraOptions = camera.calculateCameraOptionsFromTo({lng: 1, lat: 0}, 0, {lng: 0, lat: 0});
+        expect(cameraOptions).toBeDefined();
+        expect(cameraOptions.pitch).toBeCloseTo(90);
+    });
+
+    test('pitch 153.435', () => {
+
+        // distance between lng x and lng x+1 is 111.2km at same lat
+        // (elevation difference of cam and center) / 2 = grounddistance =>
+        // acos(111.2 / sqrt(111.2² + (111.2 * 2)²)) = acos(1/sqrt(5)) => 63.435 + 90 (looking up) = 153.435
+        const cameraOptions: CameraOptions = camera.calculateCameraOptionsFromTo({lng: 1, lat: 0}, 111200, {lng: 0, lat: 0}, 111200 * 3);
+        expect(cameraOptions).toBeDefined();
+        expect(cameraOptions.pitch).toBeCloseTo(153.435);
+    });
+
+    test('zoom distance 1000', () => {
+        const expectedZoom = Math.log2(camera.transform.cameraToCenterDistance / mercatorZfromAltitude(1000, 0) / camera.transform.tileSize);
+        const cameraOptions = camera.calculateCameraOptionsFromTo({lng: 0, lat: 0}, 0, {lng: 0, lat: 0}, 1000);
+
+        expect(cameraOptions).toBeDefined();
+        expect(cameraOptions.zoom).toBeCloseTo(expectedZoom);
+    });
+
+    test('zoom distance 1 lng (111.2km), 111.2km altitude away', () => {
+        const expectedZoom = Math.log2(camera.transform.cameraToCenterDistance / mercatorZfromAltitude(Math.hypot(111200, 111200), 0) / camera.transform.tileSize);
+        const cameraOptions = camera.calculateCameraOptionsFromTo({lng: 0, lat: 0}, 0, {lng: 1, lat: 0}, 111200);
+
+        expect(cameraOptions).toBeDefined();
+        expect(cameraOptions.zoom).toBeCloseTo(expectedZoom);
+    });
+
+    test('same To as From error', () => {
+        expect(() => { camera.calculateCameraOptionsFromTo({lng: 0, lat: 0}, 0, {lng: 0, lat: 0}, 0); }).toThrow();
+    });
+});
 
 describe('#jumpTo', () => {
     // Choose initial zoom to avoid center being constrained by mercator latitude limits.
@@ -838,6 +905,17 @@ describe('#easeTo', () => {
         }, 0);
     });
 
+    test('does not pan eastward across the antimeridian on a single-globe mercator map', done => {
+        const camera = createCamera({renderWorldCopies: false, zoom: 2});
+        camera.setCenter([170, 0]);
+        const initialLng = camera.getCenter().lng;
+        camera.on('moveend', () => {
+            expect(camera.getCenter().lng).toBeCloseTo(initialLng, 0);
+            done();
+        });
+        camera.easeTo({center: [210, 0], duration: 0});
+    });
+
     test('pans westward across the antimeridian', done => {
         const camera = createCamera();
         const stub = jest.spyOn(browser, 'now');
@@ -868,6 +946,17 @@ describe('#easeTo', () => {
                 camera.simulateFrame();
             }, 0);
         }, 0);
+    });
+
+    test('does not pan westward across the antimeridian on a single-globe mercator map', done => {
+        const camera = createCamera({renderWorldCopies: false, zoom: 2});
+        camera.setCenter([-170, 0]);
+        const initialLng = camera.getCenter().lng;
+        camera.on('moveend', () => {
+            expect(camera.getCenter().lng).toBeCloseTo(initialLng, 0);
+            done();
+        });
+        camera.easeTo({center: [-210, 0], duration: 0});
     });
 
     test('animation occurs when prefers-reduced-motion: reduce is set but overridden by essential: true', done => {
@@ -909,6 +998,86 @@ describe('#easeTo', () => {
         assertTransitionTime(done, camera, 0, 10);
         camera.easeTo({center: [100, 0], zoom: 3.2, bearing: 90, duration: 1000});
     });
+
+    test('jumpTo on("move") during easeTo with zoom, pitch, etc', (done) => {
+        const camera = createCamera();
+
+        camera.on('moveend', (e: Event & {done?: true}) => {
+            if ('done' in e) {
+                setTimeout(() => {
+                    done();
+                }, 50);
+            }
+        });
+
+        camera.easeTo({zoom: 20, bearing: 90, pitch: 60, duration: 500}, {done: true});
+        camera.once('move', () => {
+            camera.jumpTo({pitch: 40});
+        });
+
+        camera.simulateFrame();
+        camera.simulateFrame();
+    });
+
+    test('jumpTo on("zoom") during easeTo', (done) => {
+        const camera = createCamera();
+
+        camera.on('moveend', (e: Event & {done?: true}) => {
+            if ('done' in e) {
+                setTimeout(() => {
+                    done();
+                }, 50);
+            }
+        });
+
+        camera.easeTo({zoom: 20, duration: 500}, {done: true});
+        camera.once('zoom', () => {
+            camera.jumpTo({pitch: 40});
+        });
+
+        camera.simulateFrame();
+        camera.simulateFrame();
+    });
+
+    test('jumpTo on("pitch") during easeTo', (done) => {
+        const camera = createCamera();
+
+        camera.on('moveend', (e: Event & {done?: true}) => {
+            if ('done' in e) {
+                setTimeout(() => {
+                    done();
+                }, 50);
+            }
+        });
+
+        camera.easeTo({pitch: 60, duration: 500}, {done: true});
+        camera.once('pitch', () => {
+            camera.jumpTo({pitch: 40});
+        });
+
+        camera.simulateFrame();
+        camera.simulateFrame();
+    });
+
+    test('jumpTo on("rotate") during easeTo', (done) => {
+        const camera = createCamera();
+
+        camera.on('moveend', (e: Event & {done?: true}) => {
+            if ('done' in e) {
+                setTimeout(() => {
+                    done();
+                }, 50);
+            }
+        });
+
+        camera.easeTo({bearing: 90, duration: 500}, {done: true});
+        camera.once('rotate', () => {
+            camera.jumpTo({pitch: 40});
+        });
+
+        camera.simulateFrame();
+        camera.simulateFrame();
+    });
 });
 
 describe('#flyTo', () => {
@@ -926,17 +1095,17 @@ describe('#flyTo', () => {
     });
 
     test('does not throw when cameras current zoom is sufficiently greater than passed zoom option', () => {
-        const camera = createCamera({zoom: 22, center:[0, 0]});
-        expect(() => camera.flyTo({zoom:10, center:[0, 0]})).not.toThrow();
+        const camera = createCamera({zoom: 22, center: [0, 0]});
+        expect(() => camera.flyTo({zoom: 10, center: [0, 0]})).not.toThrow();
     });
 
     test('does not throw when cameras current zoom is above maxzoom and an offset creates infinite zoom out factor', () => {
         const transform = new Transform(0, 20.9999, 0, 60, true);
         transform.resize(512, 512);
         const camera = attachSimulateFrame(new CameraMock(transform, {} as any))
-            .jumpTo({zoom: 21, center:[0, 0]});
+            .jumpTo({zoom: 21, center: [0, 0]});
         camera._update = () => {};
-        expect(() => camera.flyTo({zoom:7.5, center:[0, 0], offset:[0, 70]})).not.toThrow();
+        expect(() => camera.flyTo({zoom: 7.5, center: [0, 0], offset: [0, 70]})).not.toThrow();
     });
 
     test('zooms to specified level', () => {
@@ -1050,10 +1219,10 @@ describe('#flyTo', () => {
             .on('move', (d) => { moved = d.data; })
             .on('rotate', (d) => { rotated = d.data; })
             .on('pitch', (d) => { pitched = d.data; })
-            .on('moveend', function(d) {
-                expect(this._zooming).toBeFalsy();
-                expect(this._panning).toBeFalsy();
-                expect(this._rotating).toBeFalsy();
+            .on('moveend', (d) => {
+                expect(camera._zooming).toBeFalsy();
+                expect(camera._panning).toBeFalsy();
+                expect(camera._rotating).toBeFalsy();
 
                 expect(movestarted).toBe('ok');
                 expect(moved).toBe('ok');
@@ -1118,10 +1287,10 @@ describe('#flyTo', () => {
             .on('pitchstart', (d) => { pitchstarted = d.data; })
             .on('pitch', (d) => { pitched = d.data; })
             .on('pitchend', (d) => { pitchended = d.data; })
-            .on('moveend', function(d) {
-                expect(this._zooming).toBeFalsy();
-                expect(this._panning).toBeFalsy();
-                expect(this._rotating).toBeFalsy();
+            .on('moveend', (d) => {
+                expect(camera._zooming).toBeFalsy();
+                expect(camera._panning).toBeFalsy();
+                expect(camera._rotating).toBeFalsy();
 
                 expect(movestarted).toBe('ok');
                 expect(moved).toBe('ok');
@@ -1558,6 +1727,83 @@ describe('#flyTo', () => {
         assertTransitionTime(done, camera, 0, 10);
         camera.flyTo({center: [100, 0], bearing: 90, animate: true});
     });
+
+    test('check elevation events freezeElevation=false', async () => {
+        const camera = createCamera();
+        const stub = jest.spyOn(browser, 'now');
+
+        const terrainCallbacks = {prepare: 0, update: 0, finalize: 0} as any;
+        camera.terrain = {} as Terrain;
+        camera._prepareElevation = () => { terrainCallbacks.prepare++; };
+        camera._updateElevation = () => { terrainCallbacks.update++; };
+        camera._finalizeElevation = () => { terrainCallbacks.finalize++; };
+        camera.setCenter([-10, 0]);
+        const moveEnded = camera.once('moveend');
+
+        stub.mockImplementation(() => 0);
+        camera.flyTo({center: [10, 0], duration: 20, freezeElevation: false});
+        stub.mockImplementation(() => 1);
+        camera.simulateFrame();
+        stub.mockImplementation(() => 20);
+        camera.simulateFrame();
+        await moveEnded;
+        expect(terrainCallbacks.prepare).toBe(1);
+        expect(terrainCallbacks.update).toBe(2);
+        expect(terrainCallbacks.finalize).toBe(0);
+    });
+
+    test('check elevation events freezeElevation=true', async() => {
+        const camera = createCamera();
+        const stub = jest.spyOn(browser, 'now');
+
+        const terrainCallbacks = {prepare: 0, update: 0, finalize: 0} as any;
+        camera.terrain = {} as Terrain;
+        camera._prepareElevation = () => { terrainCallbacks.prepare++; };
+        camera._updateElevation = () => { terrainCallbacks.update++; };
+        camera._finalizeElevation = () => { terrainCallbacks.finalize++; };
+        camera.setCenter([-10, 0]);
+        const moveEnded = camera.once('moveend');
+
+        stub.mockImplementation(() => 0);
+        camera.flyTo({center: [10, 0], duration: 20, freezeElevation: true});
+        stub.mockImplementation(() => 1);
+        camera.simulateFrame();
+        stub.mockImplementation(() => 20);
+        camera.simulateFrame();
+        await moveEnded;
+        expect(terrainCallbacks.prepare).toBe(1);
+        expect(terrainCallbacks.update).toBe(0);
+        expect(terrainCallbacks.finalize).toBe(1);
+    });
+
+    test('check elevation callbacks', done => {
+        const camera = createCamera();
+        camera.terrain = {
+            getElevationForLngLatZoom: () => 100,
+            getMinTileElevationForLngLatZoom: () => 200
+        };
+        camera.transform = {
+            elevation: 0,
+            recalculateZoom: () => true
+        };
+
+        camera._prepareElevation([10, 0]);
+        // expect(camera._elevationCenter).toBe([10, 0]);
+        expect(camera._elevationStart).toBe(0);
+        expect(camera._elevationTarget).toBe(100);
+        expect(camera._elevationFreeze).toBeTruthy();
+
+        camera.terrain.getElevationForLngLatZoom = () => 200;
+        camera._updateElevation(0.5);
+        expect(camera._elevationStart).toBe(-100);
+        expect(camera._elevationTarget).toBe(200);
+
+        camera._finalizeElevation();
+        expect(camera._elevationFreeze).toBeFalsy();
+
+        done();
+    });
+
 });
 
 describe('#isEasing', () => {
@@ -1722,7 +1968,7 @@ describe('#cameraForBounds', () => {
         const transform = camera.cameraForBounds(bb, {bearing: 175});
 
         expect(fixedLngLat(transform.center, 4)).toEqual({lng: -100.5, lat: 34.7171});
-        expect(fixedNum(transform.zoom, 3)).toBe(2.558);
+        expect(fixedNum(transform.zoom, 3)).toBe(2.396);
         expect(transform.bearing).toBe(175);
     });
 
@@ -1732,7 +1978,7 @@ describe('#cameraForBounds', () => {
         const transform = camera.cameraForBounds(bb, {bearing: -30});
 
         expect(fixedLngLat(transform.center, 4)).toEqual({lng: -100.5, lat: 34.7171});
-        expect(fixedNum(transform.zoom, 3)).toBe(2.392);
+        expect(fixedNum(transform.zoom, 3)).toBe(2.222);
         expect(transform.bearing).toBe(-30);
     });
 
@@ -1792,13 +2038,31 @@ describe('#cameraForBounds', () => {
 
         expect(fixedLngLat(transform.center, 4)).toEqual({lng: -103.3761, lat: 43.0929});
     });
+
+    test('asymmetrical transform using LngLatBounds instance', () => {
+        const transform = new Transform(2, 10, 0, 60, false);
+        transform.resize(2048, 512);
+
+        const camera = attachSimulateFrame(new CameraMock(transform, {} as any));
+        camera._update = () => {};
+
+        const bb = new LngLatBounds();
+        bb.extend([-66.9326, 49.5904]);
+        bb.extend([-125.0011, 24.9493]);
+
+        const rotatedTransform = camera.cameraForBounds(bb, {bearing: 45});
+
+        expect(fixedLngLat(rotatedTransform.center, 4)).toEqual({lng: -95.9669, lat: 38.3048});
+        expect(fixedNum(rotatedTransform.zoom, 3)).toBe(2.507);
+        expect(rotatedTransform.bearing).toBe(45);
+    });
 });
 
 describe('#fitBounds', () => {
     test('no padding passed', () => {
         const camera = createCamera();
         const bb = [[-133, 16], [-68, 50]];
-        camera.fitBounds(bb, {duration:0});
+        camera.fitBounds(bb, {duration: 0});
 
         expect(fixedLngLat(camera.getCenter(), 4)).toEqual({lng: -100.5, lat: 34.7171});
         expect(fixedNum(camera.getZoom(), 3)).toBe(2.469);
@@ -1807,7 +2071,7 @@ describe('#fitBounds', () => {
     test('padding number', () => {
         const camera = createCamera();
         const bb = [[-133, 16], [-68, 50]];
-        camera.fitBounds(bb, {padding: 15, duration:0});
+        camera.fitBounds(bb, {padding: 15, duration: 0});
 
         expect(fixedLngLat(camera.getCenter(), 4)).toEqual({lng: -100.5, lat: 34.7171});
         expect(fixedNum(camera.getZoom(), 3)).toBe(2.382);
@@ -1816,7 +2080,7 @@ describe('#fitBounds', () => {
     test('padding object', () => {
         const camera = createCamera();
         const bb = [[-133, 16], [-68, 50]];
-        camera.fitBounds(bb, {padding: {top: 10, right: 75, bottom: 50, left: 25}, duration:0});
+        camera.fitBounds(bb, {padding: {top: 10, right: 75, bottom: 50, left: 25}, duration: 0});
 
         expect(fixedLngLat(camera.getCenter(), 4)).toEqual({lng: -96.5558, lat: 32.0833});
     });
@@ -1824,7 +2088,7 @@ describe('#fitBounds', () => {
     test('padding does not get propagated to transform.padding', () => {
         const camera = createCamera();
         const bb = [[-133, 16], [-68, 50]];
-        camera.fitBounds(bb, {padding: {top: 10, right: 75, bottom: 50, left: 25}, duration:0});
+        camera.fitBounds(bb, {padding: {top: 10, right: 75, bottom: 50, left: 25}, duration: 0});
         const padding = camera.transform.padding;
 
         expect(padding).toEqual({
@@ -1842,7 +2106,7 @@ describe('#fitScreenCoordinates', () => {
         const p0 = [128, 128];
         const p1 = [256, 256];
         const bearing = 225;
-        camera.fitScreenCoordinates(p0, p1, bearing, {duration:0});
+        camera.fitScreenCoordinates(p0, p1, bearing, {duration: 0});
 
         expect(fixedLngLat(camera.getCenter(), 4)).toEqual({lng: -45, lat: 40.9799});
         expect(fixedNum(camera.getZoom(), 3)).toBe(1.5);
@@ -1854,7 +2118,7 @@ describe('#fitScreenCoordinates', () => {
         const p0 = [128, 128];
         const p1 = [256, 256];
         const bearing = 0;
-        camera.fitScreenCoordinates(p0, p1, bearing, {duration:0});
+        camera.fitScreenCoordinates(p0, p1, bearing, {duration: 0});
 
         expect(fixedLngLat(camera.getCenter(), 4)).toEqual({lng: -45, lat: 40.9799});
         expect(fixedNum(camera.getZoom(), 3)).toBe(2);
@@ -1866,10 +2130,167 @@ describe('#fitScreenCoordinates', () => {
         const p1 = [128, 128];
         const p0 = [256, 256];
         const bearing = 0;
-        camera.fitScreenCoordinates(p0, p1, bearing, {duration:0});
+        camera.fitScreenCoordinates(p0, p1, bearing, {duration: 0});
 
         expect(fixedLngLat(camera.getCenter(), 4)).toEqual({lng: -45, lat: 40.9799});
         expect(fixedNum(camera.getZoom(), 3)).toBe(2);
         expect(camera.getBearing()).toBeCloseTo(0);
+    });
+});
+
+describe('queryTerrainElevation', () => {
+    let camera: Camera;
+
+    beforeEach(() => {
+        camera = createCamera();
+    });
+
+    test('should return null if terrain is not set', () => {
+        camera.terrain = null;
+        const result = camera.queryTerrainElevation([0, 0]);
+        expect(result).toBeNull();
+    });
+
+    test('should return the correct elevation', () => {
+        // Set up mock transform and terrain objects
+        const transform = new Transform(0, 22, 0, 60, true);
+        transform.elevation = 50;
+        const terrain = {
+            getElevationForLngLatZoom: jest.fn().mockReturnValue(200)
+        } as any as Terrain;
+
+        // Set up camera with mock transform and terrain
+        camera.transform = transform;
+        camera.terrain = terrain;
+
+        // Call queryTerrainElevation with mock lngLat
+        const lngLatLike: LngLatLike = [1, 2];
+        const expectedElevation = 150; // 200 - 50 = 150
+        const result = camera.queryTerrainElevation(lngLatLike);
+
+        // Check that transform.getElevation was called with the correct arguments
+        expect(terrain.getElevationForLngLatZoom).toHaveBeenCalledWith(
+            expect.objectContaining({
+                lng: lngLatLike[0],
+                lat: lngLatLike[1],
+            }),
+            transform.tileZoom
+        );
+
+        // Check that the correct elevation value was returned
+        expect(result).toEqual(expectedElevation);
+    });
+});
+
+describe('#transformCameraUpdate', () => {
+
+    test('invoke transformCameraUpdate callback during jumpTo', done => {
+        const camera = createCamera();
+
+        let callbackCount = 0;
+        let eventCount = 0;
+
+        camera.transformCameraUpdate = () => {
+            callbackCount++;
+            return {};
+        };
+
+        camera
+            .on('move', () => {
+                eventCount++;
+                expect(eventCount).toBe(callbackCount);
+            })
+            .on('moveend', () => {
+                done();
+            });
+
+        camera.jumpTo({center: [100, 0]});
+    });
+
+    test('invoke transformCameraUpdate callback during easeTo', done => {
+        expect.assertions(2);
+        const camera = createCamera();
+        const stub = jest.spyOn(browser, 'now');
+        stub.mockImplementation(() => 0);
+
+        let callbackCount = 0;
+        let eventCount = 0;
+
+        camera.transformCameraUpdate = () => {
+            callbackCount++;
+            return {};
+        };
+
+        camera
+            .on('move', () => {
+                eventCount++;
+                expect(eventCount).toBe(callbackCount);
+            })
+            .on('moveend', () => {
+                done();
+            });
+
+        camera.easeTo({center: [100, 0], duration: 10});
+
+        setTimeout(() => {
+            stub.mockImplementation(() => 1);
+            camera.simulateFrame();
+
+            setTimeout(() => {
+                stub.mockImplementation(() => 10);
+                camera.simulateFrame();
+            }, 0);
+        }, 0);
+    });
+
+    test('invoke transformCameraUpdate callback during flyTo', done => {
+        expect.assertions(2);
+        const camera = createCamera();
+        const stub = jest.spyOn(browser, 'now');
+        stub.mockImplementation(() => 0);
+
+        let callbackCount = 0;
+        let eventCount = 0;
+
+        camera.transformCameraUpdate = () => {
+            callbackCount++;
+            return {};
+        };
+
+        camera
+            .on('move', () => {
+                eventCount++;
+                expect(eventCount).toBe(callbackCount);
+            })
+            .on('moveend', () => {
+                done();
+            });
+
+        camera.flyTo({center: [100, 0], duration: 10});
+
+        setTimeout(() => {
+            stub.mockImplementation(() => 1);
+            camera.simulateFrame();
+
+            setTimeout(() => {
+                stub.mockImplementation(() => 10);
+                camera.simulateFrame();
+            }, 0);
+        }, 0);
+    });
+
+    test('transformCameraUpdate overrides proposed camera settings', () => {
+        const camera = createCamera();
+
+        camera.transformCameraUpdate = ({center, zoom}) => {
+            return {
+                center: LngLat.convert([center.lng, center.lat + 10]),
+                zoom: Math.round(zoom)
+            };
+        };
+
+        camera.flyTo({center: [100, 0], zoom: 3.2, animate: false});
+        expect(fixedLngLat(camera.getCenter())).toEqual({lng: 100, lat: 10});
+        expect(fixedNum(camera.getZoom())).toBe(3);
     });
 });

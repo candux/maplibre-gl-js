@@ -1,20 +1,20 @@
-import assert from 'assert';
 import {
     charHasUprightVerticalOrientation,
     charAllowsIdeographicBreaking,
     charInComplexShapingScript
 } from '../util/script_detection';
-import verticalizePunctuation from '../util/verticalize_punctuation';
-import {plugin as rtlTextPlugin} from '../source/rtl_text_plugin';
+import {verticalizePunctuation} from '../util/verticalize_punctuation';
+import {rtlWorkerPlugin} from '../source/rtl_text_plugin_worker';
 import ONE_EM from './one_em';
 import {warnOnce} from '../util/util';
 
 import type {StyleGlyph, GlyphMetrics} from '../style/style_glyph';
 import {GLYPH_PBF_BORDER} from '../style/parse_glyph_pbf';
+import {TextFit} from '../style/style_image';
 import type {ImagePosition} from '../render/image_atlas';
 import {IMAGE_PADDING} from '../render/image_atlas';
 import type {Rect, GlyphPosition} from '../render/glyph_atlas';
-import Formatted, {FormattedSection} from '../style-spec/expression/types/formatted';
+import {Formatted, FormattedSection} from '@maplibre/maplibre-gl-style-spec';
 
 enum WritingMode {
     none = 0,
@@ -24,7 +24,7 @@ enum WritingMode {
 }
 
 const SHAPING_DEFAULT_OFFSET = -17;
-export {shapeText, shapeIcon, fitIconToText, getAnchorAlignment, WritingMode, SHAPING_DEFAULT_OFFSET};
+export {shapeText, shapeIcon, applyTextFit, fitIconToText, getAnchorAlignment, WritingMode, SHAPING_DEFAULT_OFFSET};
 
 // The position of a glyph relative to the text's anchor point.
 export type PositionedGlyph = {
@@ -269,7 +269,7 @@ function shapeText(
 
     let lines: Array<TaggedString>;
 
-    const {processBidirectionalText, processStyledBidirectionalText} = rtlTextPlugin;
+    const {processBidirectionalText, processStyledBidirectionalText} = rtlWorkerPlugin;
     if (processBidirectionalText && logicalInput.sections.length === 1) {
         // Bidi doesn't have to be style-aware
         lines = [];
@@ -340,16 +340,16 @@ const whitespace: {
 const breakable: {
     [_: number]: boolean;
 } = {
-    [0x0a]:   true, // newline
-    [0x20]:   true, // space
-    [0x26]:   true, // ampersand
-    [0x28]:   true, // left parenthesis
-    [0x29]:   true, // right parenthesis
-    [0x2b]:   true, // plus sign
-    [0x2d]:   true, // hyphen-minus
-    [0x2f]:   true, // solidus
-    [0xad]:   true, // soft hyphen
-    [0xb7]:   true, // middle dot
+    [0x0a]: true, // newline
+    [0x20]: true, // space
+    [0x26]: true, // ampersand
+    [0x28]: true, // left parenthesis
+    [0x29]: true, // right parenthesis
+    [0x2b]: true, // plus sign
+    [0x2d]: true, // hyphen-minus
+    [0x2f]: true, // solidus
+    [0xad]: true, // soft hyphen
+    [0xb7]: true, // middle dot
     [0x200b]: true, // zero-width space
     [0x2010]: true, // hyphen
     [0x2013]: true, // en dash
@@ -803,6 +803,56 @@ function shapeIcon(
     return {image, top: y1, bottom: y2, left: x1, right: x2};
 }
 
+export interface Box {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+}
+
+/**
+ * Called after a PositionedIcon has already been run through fitIconToText,
+ * but needs further adjustment to apply textFitWidth and textFitHeight.
+ * @param shapedIcon - The icon that will be adjusted.
+ * @returns Extents of the shapedIcon with text fit adjustments if necessary.
+ */
+function applyTextFit(shapedIcon: PositionedIcon): Box {
+    // Assume shapedIcon.image is set or this wouldn't be called.
+    // Size of the icon after it was adjusted using stretchX and Y
+    let iconLeft = shapedIcon.left;
+    let iconTop = shapedIcon.top;
+    let iconWidth = shapedIcon.right - iconLeft;
+    let iconHeight = shapedIcon.bottom - iconTop;
+    // Size of the origional content area
+    const contentWidth = shapedIcon.image.content[2] - shapedIcon.image.content[0];
+    const contentHeight = shapedIcon.image.content[3] - shapedIcon.image.content[1];
+    const textFitWidth = shapedIcon.image.textFitWidth ?? TextFit.stretchOrShrink;
+    const textFitHeight = shapedIcon.image.textFitHeight ?? TextFit.stretchOrShrink;
+    const contentAspectRatio = contentWidth / contentHeight;
+    // Scale to the proportional axis first note that height takes precidence if
+    // both axes are set to proportional.
+    if (textFitHeight === TextFit.proportional) {
+        if ((textFitWidth === TextFit.stretchOnly && iconWidth / iconHeight < contentAspectRatio) || textFitWidth === TextFit.proportional) {
+            // Push the width of the icon back out to match the content aspect ratio
+            const newIconWidth = Math.ceil(iconHeight * contentAspectRatio);
+            iconLeft *= newIconWidth / iconWidth;
+            iconWidth = newIconWidth;
+        }
+    } else if (textFitWidth === TextFit.proportional) {
+        if (textFitHeight === TextFit.stretchOnly && contentAspectRatio !== 0 && iconWidth / iconHeight > contentAspectRatio) {
+            // Push the height of the icon back out to match the content aspect ratio
+            const newIconHeight = Math.ceil(iconWidth / contentAspectRatio);
+            iconTop *= newIconHeight / iconHeight;
+            iconHeight = newIconHeight;
+        }
+    } else {
+        // If neither textFitHeight nor textFitWidth are proportional then
+        // there is no effect since the content rectangle should be precisely
+        // matched to the content
+    }
+    return {x1: iconLeft, y1: iconTop, x2: iconLeft + iconWidth, y2: iconTop + iconHeight};
+}
+
 function fitIconToText(
     shapedIcon: PositionedIcon,
     shapedText: Shaping,
@@ -811,9 +861,6 @@ function fitIconToText(
     iconOffset: [number, number],
     fontScale: number
 ): PositionedIcon {
-    assert(textFit !== 'none');
-    assert(Array.isArray(padding) && padding.length === 4);
-    assert(Array.isArray(iconOffset) && iconOffset.length === 2);
 
     const image = shapedIcon.image;
 

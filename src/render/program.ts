@@ -1,23 +1,22 @@
-import shaders from '../shaders/shaders';
-import assert from 'assert';
-import ProgramConfiguration from '../data/program_configuration';
-import VertexArrayObject from './vertex_array_object';
-import Context from '../gl/context';
+import {shaders} from '../shaders/shaders';
+import {ProgramConfiguration} from '../data/program_configuration';
+import {VertexArrayObject} from './vertex_array_object';
+import {Context} from '../gl/context';
 
-import type SegmentVector from '../data/segment';
-import type VertexBuffer from '../gl/vertex_buffer';
-import type IndexBuffer from '../gl/index_buffer';
-import type DepthMode from '../gl/depth_mode';
-import type StencilMode from '../gl/stencil_mode';
-import type ColorMode from '../gl/color_mode';
-import type CullFaceMode from '../gl/cull_face_mode';
+import type {SegmentVector} from '../data/segment';
+import type {VertexBuffer} from '../gl/vertex_buffer';
+import type {IndexBuffer} from '../gl/index_buffer';
+import type {DepthMode} from '../gl/depth_mode';
+import type {StencilMode} from '../gl/stencil_mode';
+import type {ColorMode} from '../gl/color_mode';
+import type {CullFaceMode} from '../gl/cull_face_mode';
 import type {UniformBindings, UniformValues, UniformLocations} from './uniform_binding';
 import type {BinderUniform} from '../data/program_configuration';
 import {terrainPreludeUniforms, TerrainPreludeUniformsType} from './program/terrain_program';
 import type {TerrainData} from '../render/terrain';
-import Terrain from '../render/terrain';
+import {Terrain} from '../render/terrain';
 
-export type DrawMode = WebGLRenderingContext['LINES'] | WebGLRenderingContext['TRIANGLES'] | WebGLRenderingContext['LINE_STRIP'];
+export type DrawMode = WebGLRenderingContextBase['LINES'] | WebGLRenderingContextBase['TRIANGLES'] | WebGL2RenderingContext['LINE_STRIP'];
 
 function getTokenizedAttributesAndUniforms(array: Array<string>): Array<string> {
     const result = [];
@@ -29,7 +28,12 @@ function getTokenizedAttributesAndUniforms(array: Array<string>): Array<string> 
     }
     return result;
 }
-class Program<Us extends UniformBindings> {
+
+/**
+ * @internal
+ * A webgl program to execute in the GPU space
+ */
+export class Program<Us extends UniformBindings> {
     program: WebGLProgram;
     attributes: {[_: string]: number};
     numAttributes: number;
@@ -39,7 +43,6 @@ class Program<Us extends UniformBindings> {
     failedToCreate: boolean;
 
     constructor(context: Context,
-        name: string,
         source: {
             fragmentSource: string;
             vertexSource: string;
@@ -75,8 +78,10 @@ class Program<Us extends UniformBindings> {
         if (terrain) {
             defines.push('#define TERRAIN3D;');
         }
+
         const fragmentSource = defines.concat(shaders.prelude.fragmentSource, source.fragmentSource).join('\n');
         const vertexSource = defines.concat(shaders.prelude.vertexSource, source.vertexSource).join('\n');
+
         const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
         if (gl.isContextLost()) {
             this.failedToCreate = true;
@@ -84,7 +89,11 @@ class Program<Us extends UniformBindings> {
         }
         gl.shaderSource(fragmentShader, fragmentSource);
         gl.compileShader(fragmentShader);
-        assert(gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS), (gl.getShaderInfoLog(fragmentShader) as any));
+
+        if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+            throw new Error(`Could not compile fragment shader: ${gl.getShaderInfoLog(fragmentShader)}`);
+        }
+
         gl.attachShader(this.program, fragmentShader);
 
         const vertexShader = gl.createShader(gl.VERTEX_SHADER);
@@ -94,7 +103,11 @@ class Program<Us extends UniformBindings> {
         }
         gl.shaderSource(vertexShader, vertexSource);
         gl.compileShader(vertexShader);
-        assert(gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS), (gl.getShaderInfoLog(vertexShader) as any));
+
+        if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+            throw new Error(`Could not compile vertex shader: ${gl.getShaderInfoLog(vertexShader)}`);
+        }
+
         gl.attachShader(this.program, vertexShader);
 
         this.attributes = {};
@@ -110,7 +123,10 @@ class Program<Us extends UniformBindings> {
         }
 
         gl.linkProgram(this.program);
-        assert(gl.getProgramParameter(this.program, gl.LINK_STATUS), (gl.getProgramInfoLog(this.program) as any));
+
+        if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
+            throw new Error(`Program failed to link: ${gl.getProgramInfoLog(this.program)}`);
+        }
 
         gl.deleteShader(vertexShader);
         gl.deleteShader(fragmentShader);
@@ -159,7 +175,7 @@ class Program<Us extends UniformBindings> {
         context.setColorMode(colorMode);
         context.setCullFace(cullFaceMode);
 
-        // set varaibles used by the 3d functions defined in _prelude.vertex.glsl
+        // set variables used by the 3d functions defined in _prelude.vertex.glsl
         if (terrain) {
             context.activeTexture.set(gl.TEXTURE2);
             gl.bindTexture(gl.TEXTURE_2D, terrain.depthTexture);
@@ -178,11 +194,18 @@ class Program<Us extends UniformBindings> {
             configuration.setUniforms(context, this.binderUniforms, currentProperties, {zoom: (zoom as any)});
         }
 
-        const primitiveSize = {
-            [gl.LINES]: 2,
-            [gl.TRIANGLES]: 3,
-            [gl.LINE_STRIP]: 1
-        }[drawMode];
+        let primitiveSize = 0;
+        switch (drawMode) {
+            case gl.LINES:
+                primitiveSize = 2;
+                break;
+            case gl.TRIANGLES:
+                primitiveSize = 3;
+                break;
+            case gl.LINE_STRIP:
+                primitiveSize = 1;
+                break;
+        }
 
         for (const segment of segments.get()) {
             const vaos = segment.vaos || (segment.vaos = {});
@@ -208,5 +231,3 @@ class Program<Us extends UniformBindings> {
         }
     }
 }
-
-export default Program;
